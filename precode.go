@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"log"
 	"sync"
+	"sync/atomic"
+	"time"
 )
 
 // Generator генерирует последовательность чисел 1,2,3 и т.д. и
@@ -12,30 +14,41 @@ import (
 // вызывается функция fn. Она служит для подсчёта количества и суммы
 // сгенерированных чисел.
 func Generator(ctx context.Context, ch chan<- int64, fn func(int64)) {
-	// 1. Функция Generator
-	// ...
+	defer close(ch)
+
+	for i := 1; ; i++ {
+		if ctx.Err() != nil {
+			return
+		}
+		i64 := int64(i)
+		ch <- i64
+		fn(i64)
+	}
 }
 
 // Worker читает число из канала in и пишет его в канал out.
 func Worker(in <-chan int64, out chan<- int64) {
-	// 2. Функция Worker
-	// ...
+	defer close(out)
+	for i := range in {
+		out <- i
+		time.Sleep(time.Millisecond)
+	}
 }
 
 func main() {
 	chIn := make(chan int64)
 
-	// 3. Создание контекста
-	// ...
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
 
 	// для проверки будем считать количество и сумму отправленных чисел
-	var inputSum int64   // сумма сгенерированных чисел
-	var inputCount int64 // количество сгенерированных чисел
+	var inputSum atomic.Int64   // сумма сгенерированных чисел
+	var inputCount atomic.Int64 // количество сгенерированных чисел
 
 	// генерируем числа, считая параллельно их количество и сумму
 	go Generator(ctx, chIn, func(i int64) {
-		inputSum += i
-		inputCount++
+		inputSum.Add(i)
+		inputCount.Add(1)
 	})
 
 	const NumOut = 5 // количество обрабатывающих горутин и каналов
@@ -54,8 +67,17 @@ func main() {
 
 	var wg sync.WaitGroup
 
-	// 4. Собираем числа из каналов outs
-	// ...
+	for i, ch := range outs {
+		wg.Add(1)
+		go func(ch chan int64, j int) {
+			for v := range ch {
+				amounts[j]++
+				chOut <- v
+			}
+
+			wg.Done()
+		}(ch, i)
+	}
 
 	go func() {
 		// ждём завершения работы всех горутин для outs
@@ -67,24 +89,26 @@ func main() {
 	var count int64 // количество чисел результирующего канала
 	var sum int64   // сумма чисел результирующего канала
 
-	// 5. Читаем числа из результирующего канала
-	// ...
+	for v := range chOut {
+		count++
+		sum += v
+	}
 
-	fmt.Println("Количество чисел", inputCount, count)
-	fmt.Println("Сумма чисел", inputSum, sum)
+	fmt.Println("Количество чисел", inputCount.Load(), count)
+	fmt.Println("Сумма чисел", inputSum.Load(), sum)
 	fmt.Println("Разбивка по каналам", amounts)
 
 	// проверка результатов
-	if inputSum != sum {
-		log.Fatalf("Ошибка: суммы чисел не равны: %d != %d\n", inputSum, sum)
+	if inputSum.Load() != sum {
+		log.Fatalf("Ошибка: суммы чисел не равны: %d != %d\n", inputSum.Load(), sum)
 	}
-	if inputCount != count {
-		log.Fatalf("Ошибка: количество чисел не равно: %d != %d\n", inputCount, count)
+	if inputCount.Load() != count {
+		log.Fatalf("Ошибка: количество чисел не равно: %d != %d\n", inputCount.Load(), count)
 	}
 	for _, v := range amounts {
-		inputCount -= v
+		inputCount.Add(-v)
 	}
-	if inputCount != 0 {
+	if inputCount.Load() != 0 {
 		log.Fatalf("Ошибка: разделение чисел по каналам неверное\n")
 	}
 }
